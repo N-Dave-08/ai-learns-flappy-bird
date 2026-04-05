@@ -3,6 +3,7 @@ import sys
 import random
 import neat
 import os
+import pickle
 
 # --- 1. CONFIGURATION ---
 SCREEN_WIDTH = 400
@@ -182,7 +183,13 @@ def run(config_file):
     stats = neat.StatisticsReporter()
     p.add_reporter(stats)
 
-    p.run(eval_genomes, 50) # Run for 50 generations
+    # This runs the training and returns the smartest bird ever found
+    winner = p.run(eval_genomes, 50) # Run for 50 generations
+
+    # --- NEW: SAVE THE BEST BIRD ---
+    with open("best_bird.pkl", "wb") as f:
+        pickle.dump(winner, f)
+    print("\nTraining Complete! Best bird saved to best_bird.pkl")
 
 if __name__ == '__main__':
     local_dir = os.path.dirname(__file__)
