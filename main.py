@@ -1,133 +1,190 @@
 import pygame
 import sys
 import random
+import neat
+import os
 
-# --- 1. CONFIGURATION (Your "State" Constants) ---
+# --- 1. CONFIGURATION ---
 SCREEN_WIDTH = 400
 SCREEN_HEIGHT = 600
 GRAVITY = 0.25
 BIRD_JUMP = -6
-PIPE_SPEED = 3
-PIPE_GAP = 170  # Distance between top and bottom pipes
-SPAWN_RATE = 1400 # Milliseconds between pipes
+PIPE_SPEED = 4
+PIPE_GAP = 150
+GEN = 0 # Track which generation we are on
 
-# --- 2. INITIALIZATION ---
 pygame.init()
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 clock = pygame.time.Clock()
-pygame.display.set_caption("Flappy Bird - Python Edition")
 
-# --- 3. ASSET LOADING & SCALING ---
-def load_image(path, scale_width=None, scale_height=None):
-    img = pygame.image.load(path).convert_alpha()
-    if scale_width and scale_height:
-        img = pygame.transform.scale(img, (scale_width, scale_height))
-    return img
+# --- 2. ASSET LOADING ---
+def load_image(path, w, h):
+    return pygame.transform.scale(pygame.image.load(path).convert_alpha(), (w, h))
 
-# Bird Frames (Cycling flappy00 to flappy05)
-bird_frames = [load_image(f'assets/images/flappy0{i}.png', 50, 35) for i in range(6)]
-bird_index = 0
-bird_surface = bird_frames[bird_index]
-bird_rect = bird_surface.get_rect(center=(100, SCREEN_HEIGHT // 2))
+BIRD_IMGS = [load_image(f'assets/images/flappy0{i}.png', 50, 35) for i in range(6)]
+PIPE_IMG = load_image('assets/images/pipe.png', 70, 500)
+BASE_IMG = load_image('assets/images/ground.png', SCREEN_WIDTH, 100)
+BG_IMG = load_image('assets/images/mounts.png', SCREEN_WIDTH, 300)
 
-# Obstacles & Background
-pipe_surface = load_image('assets/images/pipe.png', 70, 500)
-mount_surface = load_image('assets/images/mounts.png', SCREEN_WIDTH, 300)
-ground_surface = load_image('assets/images/ground.png', SCREEN_WIDTH, 100)
+# --- 3. CLASSES ---
+class Bird:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.tilt = 0
+        self.vel = 0
+        self.img_count = 0
+        self.img = BIRD_IMGS[0]
+        self.rect = self.img.get_rect(center=(x, y))
 
-# --- 4. GAME VARIABLES ---
-bird_movement = 0
-pipe_list = []
-score = 0
-game_active = True
+    def jump(self):
+        self.vel = BIRD_JUMP
 
-# Custom Timer for Spawning Pipes
-SPAWNPIPE = pygame.USEREVENT
-pygame.time.set_timer(SPAWNPIPE, SPAWN_RATE)
+    def move(self):
+        self.vel += GRAVITY
+        self.y += self.vel
+        self.rect.centery = self.y
 
-# --- 5. HELPER FUNCTIONS ---
-def create_pipe():
-    # Randomly pick the vertical center of the gap
-    random_pipe_pos = random.randint(200, 400)
-    bottom_pipe = pipe_surface.get_rect(midtop=(SCREEN_WIDTH + 50, random_pipe_pos + (PIPE_GAP / 2)))
-    top_pipe = pipe_surface.get_rect(midbottom=(SCREEN_WIDTH + 50, random_pipe_pos - (PIPE_GAP / 2)))
-    return bottom_pipe, top_pipe
+    def draw(self, win):
+        self.img_count = (self.img_count + 0.2) % 6
+        self.img = BIRD_IMGS[int(self.img_count)]
+        win.blit(self.img, self.rect)
 
-def move_pipes(pipes):
-    for pipe in pipes:
-        pipe.centerx -= PIPE_SPEED
-    # Clean up off-screen pipes (Garbage Collection)
-    return [pipe for pipe in pipes if pipe.right > -50]
+class Pipe:
+    def __init__(self, x):
+        self.x = x
+        self.height = random.randint(150, 400)
+        self.top = self.height - 500
+        self.bottom = self.height + PIPE_GAP
+        self.pipe_top = pygame.transform.flip(PIPE_IMG, False, True)
+        self.pipe_bottom = PIPE_IMG
+        self.passed = False
 
-def draw_pipes(pipes):
-    for pipe in pipes:
-        if pipe.bottom >= SCREEN_HEIGHT: # It's a bottom pipe
-            screen.blit(pipe_surface, pipe)
-        else: # It's a top pipe - Flip it!
-            flip_pipe = pygame.transform.flip(pipe_surface, False, True)
-            screen.blit(flip_pipe, pipe)
+    def move(self):
+        self.x -= PIPE_SPEED
 
-def check_collision(pipes):
-    for pipe in pipes:
-        if bird_rect.colliderect(pipe):
-            return False
-    if bird_rect.top <= -100 or bird_rect.bottom >= SCREEN_HEIGHT - 100:
+    def draw(self, win):
+        win.blit(self.pipe_top, (self.x, self.top))
+        win.blit(self.pipe_bottom, (self.x, self.bottom))
+
+    def collide(self, bird):
+        bird_mask = pygame.mask.from_surface(bird.img)
+        top_mask = pygame.mask.from_surface(self.pipe_top)
+        bottom_mask = pygame.mask.from_surface(self.pipe_bottom)
+
+        top_offset = (self.x - bird.rect.left, self.top - bird.rect.top)
+        bottom_offset = (self.x - bird.rect.left, self.bottom - bird.rect.top)
+
+        b_point = bird_mask.overlap(bottom_mask, bottom_offset)
+        t_point = bird_mask.overlap(top_mask, top_offset)
+
+        if b_point or t_point:
+            return True
+
         return False
-    return True
 
-# --- 6. MAIN GAME LOOP ---
-while True:
-    # --- EVENT HANDLING ---
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            pygame.quit()
-            sys.exit()
+# --- 4. MAIN NEAT EVALUATION ---
+def eval_genomes(genomes, config):
+    global GEN
+    GEN += 1
+    nets = []
+    ge = []
+    birds = []
+
+    # Initialize genomes
+    for genome_id, genome in genomes:
+        genome.fitness = 0 
+        net = neat.nn.FeedForwardNetwork.create(genome, config)
+        nets.append(net)
+        birds.append(Bird(100, 300))
+        ge.append(genome)
+
+    pipes = [Pipe(500)]
+    score = 0
+    run = True
+
+    while run and len(birds) > 0:
+        clock.tick(60)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+
+        # Determine which pipe to look at
+        pipe_ind = 0
+        if len(birds) > 0:
+            if len(pipes) > 1 and birds[0].x > pipes[0].x + 70:
+                pipe_ind = 1
+
+        for x, bird in enumerate(birds):
+            ge[x].fitness += 0.1 # Reward for staying alive
+            bird.move()
+
+            # Feed inputs to Neural Network
+            # 1. Bird Y, 2. Dist to Top Pipe, 3. Dist to Bottom Pipe
+            output = nets[x].activate((bird.y, abs(bird.y - pipes[pipe_ind].height), abs(bird.y - pipes[pipe_ind].bottom)))
+
+            if output[0] > 0.5:
+                bird.jump()
+
+        rem = []
+        add_pipe = False
+        for pipe in pipes:
+            pipe.move()
+            for x, bird in enumerate(birds):
+                if pipe.collide(bird):
+                    ge[x].fitness -= 1 # Penalty for dying
+                    birds.pop(x)
+                    nets.pop(x)
+                    ge.pop(x)
+
+                if not pipe.passed and bird.x > pipe.x:
+                    pipe.passed = True
+                    add_pipe = True
+
+            if pipe.x + 70 < 0:
+                rem.append(pipe)
+
+        if add_pipe:
+            score += 1
+            for g in ge:
+                g.fitness += 5 # Big reward for passing a pipe
+            pipes.append(Pipe(500))
+
+        for r in rem:
+            pipes.remove(r)
+
+        for x, bird in enumerate(birds):
+            if bird.y + 35 >= 500 or bird.y < 0:
+                birds.pop(x)
+                nets.pop(x)
+                ge.pop(x)
+
+        # --- DRAWING ---
+        screen.fill((112, 197, 206))
+        screen.blit(BG_IMG, (0, 200))
+        for pipe in pipes:
+            pipe.draw(screen)
+        screen.blit(BASE_IMG, (0, 500))
+        for bird in birds:
+            bird.draw(screen)
         
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_SPACE:
-                if game_active:
-                    bird_movement = BIRD_JUMP
-                else:
-                    # Reset Game
-                    game_active = True
-                    pipe_list.clear()
-                    bird_rect.center = (100, SCREEN_HEIGHT // 2)
-                    bird_movement = 0
-                    score = 0
+        pygame.display.update()
 
-        if event.type == SPAWNPIPE and game_active:
-            pipe_list.extend(create_pipe())
+# --- 5. RUN NEAT ---
+def run(config_file):
+    config = neat.config.Config(neat.DefaultGenome, neat.DefaultReproduction,
+                         neat.DefaultSpeciesSet, neat.DefaultStagnation,
+                         config_file)
 
-    # --- DRAWING & LOGIC ---
-    # 1. Background (Static Sky Color + Mountains)
-    screen.fill((112, 197, 206))
-    screen.blit(mount_surface, (0, SCREEN_HEIGHT - 400))
+    p = neat.Population(config)
+    p.add_reporter(neat.StdOutReporter(True))
+    stats = neat.StatisticsReporter()
+    p.add_reporter(stats)
 
-    if game_active:
-        # 2. Bird Physics & Animation
-        bird_movement += GRAVITY
-        bird_rect.centery += bird_movement
-        
-        # Animate bird wing flap
-        bird_index = (bird_index + 0.2) % 6 # Using float increment for smoother flap
-        bird_surface = bird_frames[int(bird_index)]
+    p.run(eval_genomes, 50) # Run for 50 generations
 
-        screen.blit(bird_surface, bird_rect)
-
-        
-        # 3. Pipes
-        pipe_list = move_pipes(pipe_list)
-        draw_pipes(pipe_list)
-        
-        # 4. Check Collisions
-        game_active = check_collision(pipe_list)
-    else:
-        # Game Over Screen Logic (You can add text here)
-        pass
-
-    # 5. Ground (Draw last so it's on top of pipes)
-    screen.blit(ground_surface, (0, SCREEN_HEIGHT - 100))
-
-    # --- REFRESH ---
-    pygame.display.update()
-    clock.tick(60) # Locked 60 FPS
+if __name__ == '__main__':
+    local_dir = os.path.dirname(__file__)
+    config_path = os.path.join(local_dir, 'config-feedforward.txt')
+    run(config_path)
